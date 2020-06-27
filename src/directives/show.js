@@ -23,25 +23,21 @@ export function handleShowDirective(component, el, value, modifiers, initialUpda
     }
 
     const handle = (resolve) => {
-        if (! value) {
-            if ( el.style.display !== 'none' ) {
+        if (value) {
+            transitionIn(el,() => {
+                show()
+            }, component)
+            resolve(() => {})
+        } else {
+            if (el.style.display !== 'none' ) {
                 transitionOut(el, () => {
                     resolve(() => {
                         hide()
                     })
-                })
+                }, component)
             } else {
                 resolve(() => {})
             }
-        } else {
-            if ( el.style.display !== '' ) {
-                transitionIn(el, () => {
-                    show()
-                })
-            }
-
-            // Resolve immediately, only hold up parent `x-show`s for hidin.
-            resolve(() => {})
         }
     }
 
@@ -62,7 +58,6 @@ export function handleShowDirective(component, el, value, modifiers, initialUpda
         component.executeAndClearRemainingShowDirectiveStack()
     }
 
-    // We'll push the handler onto a stack to be handled later.
     component.showDirectiveStack.push(handle)
 
     component.showDirectiveLastElement = el

@@ -2,6 +2,10 @@ import Component from './component'
 import { domReady, isTesting } from './utils'
 
 const Alpine = {
+    version: process.env.PKG_VERSION,
+
+    pauseMutationObserver: false,
+
     start: async function () {
         if (! isTesting()) {
             await domReady()
@@ -52,6 +56,8 @@ const Alpine = {
         }
 
         const observer = new MutationObserver((mutations) => {
+            if (this.pauseMutationObserver) return;
+
             for (let i=0; i < mutations.length; i++){
                 if (mutations[i].addedNodes.length > 0) {
                     mutations[i].addedNodes.forEach(node => {
@@ -75,7 +81,15 @@ const Alpine = {
 
     initializeComponent: function (el) {
         if (! el.__x) {
-            el.__x = new Component(el)
+            // Wrap in a try/catch so that we don't prevent other components
+            // from initializing when one component contains an error.
+            try {
+                el.__x = new Component(el)
+            } catch (error) {
+                setTimeout(() => {
+                    throw error
+                }, 0)
+            }
         }
     },
 
@@ -88,7 +102,14 @@ const Alpine = {
 
 if (! isTesting()) {
     window.Alpine = Alpine
-    window.Alpine.start()
+
+    if (window.deferLoadingAlpine) {
+        window.deferLoadingAlpine(function () {
+            window.Alpine.start()
+        })
+   } else {
+        window.Alpine.start()
+   }
 }
 
 export default Alpine

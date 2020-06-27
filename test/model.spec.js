@@ -61,6 +61,41 @@ test('x-model casts value to number if number modifier is present', async () => 
     await wait(() => { expect(document.querySelector('[x-data]').__x.$data.foo).toEqual(123) })
 })
 
+test('x-model with number modifier returns: null if empty, original value if casting fails, numeric value if casting passes', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ foo: 0, bar: '' }">
+            <input type="number" x-model.number="foo"></input>
+            <input x-model.number="bar"></input>
+        </div>
+    `
+
+    Alpine.start()
+
+    fireEvent.input(document.querySelectorAll('input')[0], { target: { value: '' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.foo).toEqual(null) })
+
+    fireEvent.input(document.querySelectorAll('input')[0], { target: { value: '-' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.foo).toEqual(null) })
+
+    fireEvent.input(document.querySelectorAll('input')[0], { target: { value: '-123' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.foo).toEqual(-123) })
+
+    fireEvent.input(document.querySelectorAll('input')[1], { target: { value: '' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.bar).toEqual(null) })
+
+    fireEvent.input(document.querySelectorAll('input')[1], { target: { value: '-' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.bar).toEqual('-') })
+
+    fireEvent.input(document.querySelectorAll('input')[1], { target: { value: '-123' }})
+
+    await wait(() => { expect(document.querySelector('[x-data]').__x.$data.bar).toEqual(-123) })
+})
+
 test('x-model trims value if trim modifier is present', async () => {
     document.body.innerHTML = `
         <div x-data="{ foo: '' }">
@@ -96,7 +131,7 @@ test('x-model binds checkbox value', async () => {
         <div x-data="{ foo: true }">
             <input type="checkbox" x-model="foo"></input>
 
-            <span x-bind:bar="foo"></span>
+            <span x-bind:bar="JSON.stringify(foo)"></span>
         </div>
     `
 
@@ -133,6 +168,41 @@ test('x-model binds checkbox value to array', async () => {
         expect(document.querySelectorAll('input')[1].checked).toEqual(true)
         expect(document.querySelector('span').getAttribute('bar')).toEqual("bar,baz")
     })
+})
+
+test('x-model checkbox array binding supports .number modifier', async () => {
+    document.body.innerHTML = `
+        <div
+            x-data="{
+                selected: [2]
+            }"
+        >
+            <input type="checkbox" value="1" x-model.number="selected" />
+            <input type="checkbox" value="2" x-model.number="selected" />
+            <input type="checkbox" value="3" x-model.number="selected" />
+
+            <span x-bind:bar="JSON.stringify(selected)"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelectorAll('input[type=checkbox]')[0].checked).toEqual(false)
+    expect(document.querySelectorAll('input[type=checkbox]')[1].checked).toEqual(true)
+    expect(document.querySelectorAll('input[type=checkbox]')[2].checked).toEqual(false)
+    expect(document.querySelector('span').getAttribute('bar')).toEqual("[2]")
+
+    fireEvent.change(document.querySelectorAll('input[type=checkbox]')[2], { target: { checked: true }})
+
+    await wait(() => { expect(document.querySelector('span').getAttribute('bar')).toEqual("[2,3]") })
+
+    fireEvent.change(document.querySelectorAll('input[type=checkbox]')[0], { target: { checked: true }})
+
+    await wait(() => { expect(document.querySelector('span').getAttribute('bar')).toEqual("[2,3,1]") })
+
+    fireEvent.change(document.querySelectorAll('input[type=checkbox]')[0], { target: { checked: false }})
+    fireEvent.change(document.querySelectorAll('input[type=checkbox]')[1], { target: { checked: false }})
+    await wait(() => { expect(document.querySelector('span').getAttribute('bar')).toEqual("[3]") })
 })
 
 test('x-model binds radio value', async () => {

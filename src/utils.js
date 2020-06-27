@@ -12,20 +12,20 @@ export function domReady() {
 }
 
 export function arrayUnique(array) {
-    var a = array.concat();
-    for(var i=0; i<a.length; ++i) {
-        for(var j=i+1; j<a.length; ++j) {
-            if(a[i] === a[j])
-                a.splice(j--, 1);
-        }
-    }
-
-    return a;
+    return Array.from(new Set(array))
 }
 
 export function isTesting() {
     return navigator.userAgent, navigator.userAgent.includes("Node.js")
         || navigator.userAgent.includes("jsdom")
+}
+
+export function warnIfMalformedTemplate(el, directive) {
+    if (el.tagName.toLowerCase() !== 'template') {
+        console.warn(`Alpine: [${directive}] directive should only be added to <template> tags. See https://github.com/alpinejs/alpine#${directive}`)
+    } else if (el.content.childElementCount !== 1) {
+        console.warn(`Alpine: <template> tag with [${directive}] encountered with multiple element roots. Make sure <template> only has a single child node.`)
+    }
 }
 
 export function kebabCase(subject) {
@@ -58,48 +58,93 @@ export function debounce(func, wait) {
 }
 
 export function saferEval(expression, dataContext, additionalHelperVariables = {}) {
-    return (new Function(['$data', ...Object.keys(additionalHelperVariables)], `var result; with($data) { result = ${expression} }; return result`))(
+    if (typeof expression === 'function') {
+        return expression.call(dataContext)
+    }
+
+    return (new Function(['$data', ...Object.keys(additionalHelperVariables)], `var __alpine_result; with($data) { __alpine_result = ${expression} }; return __alpine_result`))(
         dataContext, ...Object.values(additionalHelperVariables)
     )
 }
 
 export function saferEvalNoReturn(expression, dataContext, additionalHelperVariables = {}) {
+    if (typeof expression === 'function') {
+        return expression.call(dataContext)
+    }
+
+    // For the cases when users pass only a function reference to the caller: `x-on:click="foo"`
+    // Where "foo" is a function. Also, we'll pass the function the event instance when we call it.
+    if (Object.keys(dataContext).includes(expression)) {
+        let methodReference = (new Function(['dataContext', ...Object.keys(additionalHelperVariables)], `with(dataContext) { return ${expression} }`))(
+            dataContext, ...Object.values(additionalHelperVariables)
+        )
+
+        if (typeof methodReference === 'function') {
+            return methodReference.call(dataContext, additionalHelperVariables['$event'])
+        }
+    }
+
     return (new Function(['dataContext', ...Object.keys(additionalHelperVariables)], `with(dataContext) { ${expression} }`))(
         dataContext, ...Object.values(additionalHelperVariables)
     )
 }
 
+const xAttrRE = /^x-(on|bind|data|text|html|model|if|for|show|cloak|transition|ref|spread)\b/
+
 export function isXAttr(attr) {
     const name = replaceAtAndColonWithStandardSyntax(attr.name)
-
-    const xAttrRE = /x-(on|bind|data|text|html|model|if|for|show|cloak|transition|ref)/
 
     return xAttrRE.test(name)
 }
 
-export function getXAttrs(el, type) {
-    return Array.from(el.attributes)
-        .filter(isXAttr)
-        .map(attr => {
-            const name = replaceAtAndColonWithStandardSyntax(attr.name)
+export function getXAttrs(el, component, type) {
+    let directives = Array.from(el.attributes).filter(isXAttr).map(parseHtmlAttribute)
 
-            const typeMatch = name.match(/x-(on|bind|data|text|html|model|if|for|show|cloak|transition|ref)/)
-            const valueMatch = name.match(/:([a-zA-Z\-:]+)/)
-            const modifiers = name.match(/\.[^.\]]+(?=[^\]]*$)/g) || []
+    // Get an object of directives from x-spread.
+    let spreadDirective = directives.filter(directive => directive.type === 'spread')[0]
 
-            return {
-                type: typeMatch ? typeMatch[1] : null,
-                value: valueMatch ? valueMatch[1] : null,
-                modifiers: modifiers.map(i => i.replace('.', '')),
-                expression: attr.value,
-            }
-        })
-        .filter(i => {
-            // If no type is passed in for filtering, bypass filter
-            if (! type) return true
+    if (spreadDirective) {
+        let spreadObject = saferEval(spreadDirective.expression, component.$data)
 
-            return i.type === type
-        })
+        // Add x-spread directives to the pile of existing directives.
+        directives = directives.concat(Object.entries(spreadObject).map(([name, value]) => parseHtmlAttribute({ name, value })))
+    }
+
+    return directives.filter(i => {
+        // If no type is passed in for filtering, bypass filter
+        if (! type) return true
+
+        return i.type === type
+    })
+}
+
+function parseHtmlAttribute({ name, value }) {
+    const normalizedName = replaceAtAndColonWithStandardSyntax(name)
+
+    const typeMatch = normalizedName.match(xAttrRE)
+    const valueMatch = normalizedName.match(/:([a-zA-Z\-:]+)/)
+    const modifiers = normalizedName.match(/\.[^.\]]+(?=[^\]]*$)/g) || []
+
+    return {
+        type: typeMatch ? typeMatch[1] : null,
+        value: valueMatch ? valueMatch[1] : null,
+        modifiers: modifiers.map(i => i.replace('.', '')),
+        expression: value,
+    }
+}
+
+export function isBooleanAttr(attrName) {
+    // As per HTML spec table https://html.spec.whatwg.org/multipage/indices.html#attributes-3:boolean-attribute
+    // Array roughly ordered by estimated usage
+    const booleanAttributes = [
+        'disabled','checked','required','readonly','hidden','open', 'selected',
+        'autofocus', 'itemscope', 'multiple', 'novalidate','allowfullscreen',
+        'allowpaymentrequest', 'formnovalidate', 'autoplay', 'controls', 'loop',
+        'muted', 'playsinline', 'default', 'ismap', 'reversed', 'async', 'defer',
+        'nomodule'
+    ]
+
+    return booleanAttributes.includes(attrName)
 }
 
 export function replaceAtAndColonWithStandardSyntax(name) {
@@ -112,12 +157,15 @@ export function replaceAtAndColonWithStandardSyntax(name) {
     return name
 }
 
-export function transitionIn(el, show, forceSkip = false) {
-    // We don't want to transition on the initial page load.
+export function convertClassStringToArray(classList, filterFn = Boolean) {
+    return classList.split(' ').filter(filterFn)
+}
+
+export function transitionIn(el, show, component, forceSkip = false) {
     if (forceSkip) return show()
 
-    const attrs = getXAttrs(el, 'transition')
-    const showAttr = getXAttrs(el, 'show')[0]
+    const attrs = getXAttrs(el, component, 'transition')
+    const showAttr = getXAttrs(el, component, 'show')[0]
 
     // If this is triggered by a x-show.transition.
     if (showAttr && showAttr.modifiers.includes('transition')) {
@@ -134,19 +182,20 @@ export function transitionIn(el, show, forceSkip = false) {
 
         transitionHelperIn(el, modifiers, show)
     // Otherwise, we can assume x-transition:enter.
-    } else if (attrs.length > 0) {
-        transitionClassesIn(el, attrs, show)
+    } else if (attrs.filter(attr => ['enter', 'enter-start', 'enter-end'].includes(attr.value)).length > 0) {
+        transitionClassesIn(el, component, attrs, show)
     } else {
     // If neither, just show that damn thing.
         show()
     }
 }
 
-export function transitionOut(el, hide, forceSkip = false) {
+export function transitionOut(el, hide, component, forceSkip = false) {
+     // We don't want to transition on the initial page load.
     if (forceSkip) return hide()
 
-    const attrs = getXAttrs(el, 'transition')
-    const showAttr = getXAttrs(el, 'show')[0]
+    const attrs = getXAttrs(el, component, 'transition')
+    const showAttr = getXAttrs(el, component, 'show')[0]
 
     if (showAttr && showAttr.modifiers.includes('transition')) {
         let modifiers = showAttr.modifiers
@@ -159,8 +208,8 @@ export function transitionOut(el, hide, forceSkip = false) {
             ? modifiers.filter((i, index) => index > modifiers.indexOf('out')) : modifiers
 
         transitionHelperOut(el, modifiers, settingBothSidesOfTransition, hide)
-    } else if (attrs.length > 0) {
-        transitionClassesOut(el, attrs, hide)
+    } else if (attrs.filter(attr => ['leave', 'leave-start', 'leave-end'].includes(attr.value)).length > 0) {
+        transitionClassesOut(el, component, attrs, hide)
     } else {
         hide()
     }
@@ -288,18 +337,24 @@ export function transitionHelper(el, modifiers, hook1, hook2, styleValues) {
     transition(el, stages)
 }
 
-export function transitionClassesIn(el, directives, showCallback) {
-    const enter = (directives.find(i => i.value === 'enter') || { expression: '' }).expression.split(' ').filter(i => i !== '')
-    const enterStart = (directives.find(i => i.value === 'enter-start') || { expression: '' }).expression.split(' ').filter(i => i !== '')
-    const enterEnd = (directives.find(i => i.value === 'enter-end') || { expression: '' }).expression.split(' ').filter(i => i !== '')
+export function transitionClassesIn(el, component, directives, showCallback) {
+    let ensureStringExpression = (expression) => {
+        return typeof expression === 'function'
+            ? component.evaluateReturnExpression(el, expression)
+            : expression
+    }
+
+    const enter = convertClassStringToArray(ensureStringExpression((directives.find(i => i.value === 'enter') || { expression: '' }).expression))
+    const enterStart = convertClassStringToArray(ensureStringExpression((directives.find(i => i.value === 'enter-start') || { expression: '' }).expression))
+    const enterEnd = convertClassStringToArray(ensureStringExpression((directives.find(i => i.value === 'enter-end') || { expression: '' }).expression))
 
     transitionClasses(el, enter, enterStart, enterEnd, showCallback, () => {})
 }
 
-export function transitionClassesOut(el, directives, hideCallback) {
-    const leave = (directives.find(i => i.value === 'leave') || { expression: '' }).expression.split(' ').filter(i => i !== '')
-    const leaveStart = (directives.find(i => i.value === 'leave-start') || { expression: '' }).expression.split(' ').filter(i => i !== '')
-    const leaveEnd = (directives.find(i => i.value === 'leave-end') || { expression: '' }).expression.split(' ').filter(i => i !== '')
+export function transitionClassesOut(el, component, directives, hideCallback) {
+    const leave = convertClassStringToArray((directives.find(i => i.value === 'leave') || { expression: '' }).expression)
+    const leaveStart = convertClassStringToArray((directives.find(i => i.value === 'leave-start') || { expression: '' }).expression)
+    const leaveEnd = convertClassStringToArray((directives.find(i => i.value === 'leave-end') || { expression: '' }).expression)
 
     transitionClasses(el, leave, leaveStart, leaveEnd, () => {}, hideCallback)
 }
@@ -343,11 +398,16 @@ export function transition(el, stages) {
         // for every single transition property. Let's grab the first one and call it a day.
         let duration = Number(getComputedStyle(el).transitionDuration.replace(/,.*/, '').replace('s', '')) * 1000
 
+        if (duration === 0) {
+            duration = Number(getComputedStyle(el).animationDuration.replace('s', '')) * 1000
+        }
+
         stages.show()
 
         requestAnimationFrame(() => {
             stages.end()
 
+            // Assign current transition to el in case we need to force it.
             setTimeout(() => {
                 stages.hide()
 
@@ -356,34 +416,11 @@ export function transition(el, stages) {
                 if (el.isConnected) {
                     stages.cleanup()
                 }
-            }, duration);
+            }, duration)
         })
     });
 }
 
-export function deepProxy(target, proxyHandler) {
-    // If target is null, return it.
-    if (target === null) return target;
-
-    // If target is not an object, return it.
-    if (typeof target !== 'object') return target;
-
-    // If target is a DOM node (like in the case of this.$el), return it.
-    if (target instanceof Node) return target
-
-    // If target is already an Alpine proxy, return it.
-    if (target['$isAlpineProxy']) return target;
-
-    // Otherwise proxy the properties recursively.
-    // This enables reactivity on setting nested data.
-    // Note that if a project is not a valid object, it won't be converted to a proxy
-    for (let property in target) {
-        target[property] = deepProxy(target[property], proxyHandler)
-    }
-
-    return new Proxy(target, proxyHandler)
-}
-
-function isNumeric(subject){
+export function isNumeric(subject){
     return ! isNaN(subject)
 }

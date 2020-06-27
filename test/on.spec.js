@@ -6,7 +6,7 @@ global.MutationObserver = class {
     observe() {}
 }
 
-test('data modified in event listener updates effected attribute bindings', async () => {
+test('data modified in event listener updates affected attribute bindings', async () => {
     document.body.innerHTML = `
         <div x-data="{ foo: 'bar' }">
             <button x-on:click="foo = 'baz'"></button>
@@ -24,7 +24,7 @@ test('data modified in event listener updates effected attribute bindings', asyn
     await wait(() => { expect(document.querySelector('span').getAttribute('foo')).toEqual('baz') })
 })
 
-test('nested data modified in event listener updates effected attribute bindings', async () => {
+test('nested data modified in event listener updates affected attribute bindings', async () => {
     document.body.innerHTML = `
         <div x-data="{ nested: { foo: 'bar' } }">
             <button x-on:click="nested.foo = 'baz'"></button>
@@ -60,6 +60,33 @@ test('.stop modifier', async () => {
 
     await wait(() => {
         expect(document.querySelector('div').__x.$data.foo).toEqual('baz')
+    })
+})
+
+test('.self modifier', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ foo: 'bar' }">
+            <div x-on:click.self="foo = 'baz'" id="selfTarget">
+                <button></button>
+            </div>
+            <span x-text="foo"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual('bar')
+
+    document.querySelector('button').click()
+
+    await wait(() => {
+        expect(document.querySelector('span').innerText).toEqual('bar')
+    })
+
+    document.querySelector('#selfTarget').click()
+
+    await wait(() => {
+        expect(document.querySelector('span').innerText).toEqual('baz')
     })
 })
 
@@ -161,7 +188,7 @@ test('.once modifier', async () => {
     expect(document.querySelector('span').getAttribute('foo')).toEqual('1')
 })
 
-test('.once modifier doest remove listener if false is returned', async () => {
+test('.once modifier does not remove listener if false is returned', async () => {
     document.body.innerHTML = `
         <div x-data="{ count: 0 }">
             <button x-on:click.once="return ++count === 2"></button>
@@ -313,7 +340,6 @@ test('supports short syntax', async () => {
     document.body.innerHTML = `
         <div x-data="{ foo: 'bar' }">
             <button @click="foo = 'baz'"></button>
-
             <span x-bind:foo="foo"></span>
         </div>
     `
@@ -348,7 +374,6 @@ test('event with colon', async () => {
     await wait(() => { expect(document.querySelector('span').getAttribute('foo')).toEqual('baz') })
 })
 
-
 test('prevent default action when an event returns false', async () => {
     window.confirm = jest.fn().mockImplementation(() => false)
 
@@ -371,4 +396,70 @@ test('prevent default action when an event returns false', async () => {
     document.querySelector('input').click()
 
     expect(document.querySelector('input').checked).toEqual(true)
+})
+
+test('allow method reference to be passed to listeners', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ foo: 'bar', changeFoo() { this.foo = 'baz' } }">
+            <button x-on:click="changeFoo"></button>
+            <span x-text="foo"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual('bar')
+
+    document.querySelector('button').click()
+
+    await new Promise(resolve => setTimeout(resolve, 1))
+
+    expect(document.querySelector('span').innerText).toEqual('baz')
+})
+
+test('event instance is passed to method reference', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ foo: 'bar', changeFoo(e) { this.foo = e.target.id } }">
+            <button x-on:click="changeFoo" id="baz"></button>
+            <span x-text="foo"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual('bar')
+
+    document.querySelector('button').click()
+
+    await new Promise(resolve => setTimeout(resolve, 1))
+
+    expect(document.querySelector('span').innerText).toEqual('baz')
+})
+
+test('autocomplete event does not trigger keydown with modifier callback', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ count: 0 }">
+            <input type="text" x-on:keydown.?="count++">
+
+            <span x-text="count"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual(0)
+
+    const autocompleteEvent = new Event('keydown')
+
+    fireEvent.keyDown(document.querySelector('input'), { key: 'Enter' })
+
+    await wait(() => { expect(document.querySelector('span').innerText).toEqual(0) })
+
+    fireEvent.keyDown(document.querySelector('input'), { key: '?' })
+
+    await wait(() => { expect(document.querySelector('span').innerText).toEqual(1) })
+
+    fireEvent(document.querySelector('input'), autocompleteEvent)
+
+    await wait(() => { expect(document.querySelector('span').innerText).toEqual(1) })
 })

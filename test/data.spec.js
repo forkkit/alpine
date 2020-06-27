@@ -48,6 +48,18 @@ test('x-data can use attributes from a reusable function', async () => {
     expect(document.querySelector('span').innerText).toEqual('bar')
 })
 
+test('x-data can use $el', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ text: $el.dataset.text }" data-text="test">
+          <span x-text="text"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual('test')
+})
+
 test('functions in x-data are reactive', async () => {
     document.body.innerHTML = `
         <div x-data="{ foo: 'bar', getFoo() {return this.foo}}">
@@ -104,4 +116,23 @@ test('Proxies are not nested and duplicated when manipulating an array', async (
     await wait(() => { expect(document.querySelector('span').innerText).toEqual('foo') })
     document.querySelector('button').click()
     await wait(() => { expect(document.querySelector('span').innerText).toEqual('bar') })
+})
+
+test('component refresh one time per update whatever the number of mutations in the update', async () => {
+    window.refreshCount = 0
+
+    document.body.innerHTML = `
+        <div x-data="{ items: ['foo', 'bar'], qux: 'quux', test() {return ++refreshCount} }">
+            <span x-text="test()"></span>
+            <button x-on:click="items.push('baz'); qux = 'corge';"></button>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(refreshCount).toEqual(1)
+
+    document.querySelector('button').click()
+
+    await wait(() => { expect(refreshCount).toEqual(2) })
 })

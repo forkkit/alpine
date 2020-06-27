@@ -1,10 +1,13 @@
-import { walk, saferEval, saferEvalNoReturn, getXAttrs, debounce, deepProxy } from './utils'
+import { walk, saferEval, saferEvalNoReturn, getXAttrs, debounce, convertClassStringToArray } from './utils'
 import { handleForDirective } from './directives/for'
 import { handleAttributeBindingDirective } from './directives/bind'
+import { handleTextDirective } from './directives/text'
+import { handleHtmlDirective } from './directives/html'
 import { handleShowDirective } from './directives/show'
 import { handleIfDirective } from './directives/if'
 import { registerModelListener } from './directives/model'
 import { registerListener } from './directives/on'
+import { unwrap, wrap } from './observable'
 
 export default class Component {
     constructor(el, seedDataForCloning = null) {
@@ -14,7 +17,7 @@ export default class Component {
         const dataExpression = dataAttr === '' ? '{}' : dataAttr
         const initExpression = this.$el.getAttribute('x-init')
 
-        this.unobservedData = seedDataForCloning ? seedDataForCloning : saferEval(dataExpression, {})
+        this.unobservedData = seedDataForCloning ? seedDataForCloning : saferEval(dataExpression, { $el: this.$el })
 
         /* IE11-ONLY:START */
             // For IE11, add our magic properties to the original data for access.
@@ -22,10 +25,13 @@ export default class Component {
             this.unobservedData.$el = null
             this.unobservedData.$refs = null
             this.unobservedData.$nextTick = null
+            this.unobservedData.$watch = null
         /* IE11-ONLY:END */
 
         // Construct a Proxy-based observable. This will be used to handle reactivity.
-        this.$data = this.wrapDataInObservable(this.unobservedData)
+        let { membrane, data } = this.wrapDataInObservable(this.unobservedData)
+        this.$data = data
+        this.membrane = membrane
 
         // After making user-supplied data methods reactive, we can now add
         // our magic properties to the original data for access.
@@ -35,6 +41,13 @@ export default class Component {
         this.nextTickStack = []
         this.unobservedData.$nextTick = (callback) => {
             this.nextTickStack.push(callback)
+        }
+
+        this.watchers = {}
+        this.unobservedData.$watch = (property, callback) => {
+            if (! this.watchers[property]) this.watchers[property] = []
+
+            this.watchers[property].push(callback)
         }
 
         this.showDirectiveStack = []
@@ -58,57 +71,56 @@ export default class Component {
         this.listenForNewElementsToInitialize()
 
         if (typeof initReturnedCallback === 'function') {
-            // Run the callback returned form the "x-init" hook to allow the user to do stuff after
+            // Run the callback returned from the "x-init" hook to allow the user to do stuff after
             // Alpine's got it's grubby little paws all over everything.
             initReturnedCallback.call(this.$data)
         }
     }
 
     getUnobservedData() {
-        let rawData = {}
-
-        Object.keys(this.unobservedData).forEach(key => {
-            if (['$el', '$refs', '$nextTick'].includes(key)) return
-
-            rawData[key] = this.unobservedData[key]
-        })
-
-        return rawData
+        return unwrap(this.membrane, this.$data)
     }
 
     wrapDataInObservable(data) {
         var self = this
 
-        const proxyHandler = {
-            set(obj, property, value) {
-                // Set the value converting it to a "Deep Proxy" when required
-                // Note that if a project is not a valid object, it won't be converted to a proxy
-                const setWasSuccessful = Reflect.set(obj, property, deepProxy(value, proxyHandler))
+        let updateDom = debounce(function () {
+            self.updateElements(self.$el)
+        }, 0)
 
-                // Don't react to data changes for cases like the `x-created` hook.
-                if (self.pauseReactivity) return setWasSuccessful
+        return wrap(data, (target, key) => {
+            if (self.watchers[key]) {
+                // If there's a watcher for this specific key, run it.
+                self.watchers[key].forEach(callback => callback(target[key]))
+            } else {
+                // Let's walk through the watchers with "dot-notation" (foo.bar) and see
+                // if this mutation fits any of them.
+                Object.keys(self.watchers)
+                    .filter(i => i.includes('.'))
+                    .forEach(fullDotNotationKey => {
+                        let dotNotationParts = fullDotNotationKey.split('.')
 
-                debounce(() => {
-                    self.updateElements(self.$el)
+                        // If this dot-notation watcher's last "part" doesn't match the current
+                        // key, then skip it early for performance reasons.
+                        if (key !== dotNotationParts[dotNotationParts.length - 1]) return
 
-                    // Walk through the $nextTick stack and clear it as we go.
-                    while (self.nextTickStack.length > 0) {
-                        self.nextTickStack.shift()()
-                    }
-                }, 0)()
-
-                return setWasSuccessful
-            },
-            get(target, key) {
-                // Provide a way to determine if this object is an Alpine proxy or not.
-                if (key === "$isAlpineProxy") return true
-
-                // Just return the flippin' value. Gawsh.
-                return target[key]
+                        // Now, walk through the dot-notation "parts" recursively to find
+                        // a match, and call the watcher if one's found.
+                        dotNotationParts.reduce((comparisonData, part) => {
+                            if (Object.is(target, comparisonData)) {
+                                // Run the watchers.
+                                self.watchers[fullDotNotationKey].forEach(callback => callback(target[key]))
+                            }
+                            return comparisonData[part]
+                        }, self.getUnobservedData())
+                    })
             }
-        }
 
-        return deepProxy(data, proxyHandler)
+            // Don't react to data changes for cases like the `x-created` hook.
+            if (self.pauseReactivity) return
+
+            updateDom()
+        })
     }
 
     walkAndSkipNestedComponents(el, callback, initializeComponentCallback = () => {}) {
@@ -134,6 +146,9 @@ export default class Component {
             // Don't touch spawns from for loop
             if (el.__x_for_key !== undefined) return false
 
+            // Don't touch spawns from if directives
+            if (el.__x_inserted_me !== undefined) return false
+
             this.initializeElement(el, extraVars)
         }, el => {
             el.__x = new Component(el)
@@ -141,17 +156,14 @@ export default class Component {
 
         this.executeAndClearRemainingShowDirectiveStack()
 
-        // Walk through the $nextTick stack and clear it as we go.
-        while (this.nextTickStack.length > 0) {
-            this.nextTickStack.shift()()
-        }
+        this.executeAndClearNextTickStack(rootEl)
     }
 
     initializeElement(el, extraVars) {
         // To support class attribute merging, we have to know what the element's
         // original class attribute looked like for reference.
-        if (el.hasAttribute('class') && getXAttrs(el).length > 0) {
-            el.__x_original_classes = el.getAttribute('class').split(' ')
+        if (el.hasAttribute('class') && getXAttrs(el, this).length > 0) {
+            el.__x_original_classes = convertClassStringToArray(el.getAttribute('class'))
         }
 
         this.registerListeners(el, extraVars)
@@ -170,9 +182,19 @@ export default class Component {
 
         this.executeAndClearRemainingShowDirectiveStack()
 
-        // Walk through the $nextTick stack and clear it as we go.
-        while (this.nextTickStack.length > 0) {
-            this.nextTickStack.shift()()
+        this.executeAndClearNextTickStack(rootEl)
+    }
+
+    executeAndClearNextTickStack(el) {
+        // Skip spawns from alpine directives
+        if (el === this.$el && this.nextTickStack.length > 0) {
+            // We run the tick stack after the next frame to allow any
+            // running transitions to pass the initial show stage.
+            requestAnimationFrame(() => {
+                while (this.nextTickStack.length > 0) {
+                    this.nextTickStack.shift()()
+                }
+            })
         }
     }
 
@@ -202,7 +224,7 @@ export default class Component {
     }
 
     registerListeners(el, extraVars) {
-        getXAttrs(el).forEach(({ type, value, modifiers, expression }) => {
+        getXAttrs(el, this).forEach(({ type, value, modifiers, expression }) => {
             switch (type) {
                 case 'on':
                     registerListener(this, el, value, modifiers, expression, extraVars)
@@ -218,34 +240,37 @@ export default class Component {
     }
 
     resolveBoundAttributes(el, initialUpdate = false, extraVars) {
-        let attrs = getXAttrs(el)
+        let attrs = getXAttrs(el, this)
+        if (el.type !== undefined && el.type === 'radio') {
+            // If there's an x-model on a radio input, move it to end of attribute list
+            // to ensure that x-bind:value (if present) is processed first.
+            const modelIdx = attrs.findIndex((attr) => attr.type === 'model')
+            if (modelIdx > -1) {
+                attrs.push(attrs.splice(modelIdx, 1)[0])
+            }
+        }
 
         attrs.forEach(({ type, value, modifiers, expression }) => {
             switch (type) {
                 case 'model':
-                    handleAttributeBindingDirective(this, el, 'value', expression, extraVars)
+                    handleAttributeBindingDirective(this, el, 'value', expression, extraVars, type)
                     break;
 
                 case 'bind':
                     // The :key binding on an x-for is special, ignore it.
                     if (el.tagName.toLowerCase() === 'template' && value === 'key') return
 
-                    handleAttributeBindingDirective(this, el, value, expression, extraVars)
+                    handleAttributeBindingDirective(this, el, value, expression, extraVars, type)
                     break;
 
                 case 'text':
                     var output = this.evaluateReturnExpression(el, expression, extraVars);
 
-                    // If nested model key is undefined, set the default value to empty string.
-                    if (output === undefined && expression.match(/\./).length) {
-                        output = ''
-                    }
-
-                    el.innerText = output
+                    handleTextDirective(el, output, expression)
                     break;
 
                 case 'html':
-                    el.innerHTML = this.evaluateReturnExpression(el, expression, extraVars)
+                    handleHtmlDirective(this, el, expression, extraVars)
                     break;
 
                 case 'show':
@@ -261,11 +286,11 @@ export default class Component {
 
                     var output = this.evaluateReturnExpression(el, expression, extraVars)
 
-                    handleIfDirective(el, output, initialUpdate)
+                    handleIfDirective(this, el, output, initialUpdate, extraVars)
                     break;
 
                 case 'for':
-                    handleForDirective(this, el, expression, initialUpdate)
+                    handleForDirective(this, el, expression, initialUpdate, extraVars)
                     break;
 
                 case 'cloak':
@@ -311,13 +336,14 @@ export default class Component {
         }
 
         const observer = new MutationObserver((mutations) => {
-            for (let i=0; i < mutations.length; i++){
+            for (let i=0; i < mutations.length; i++) {
                 // Filter out mutations triggered from child components.
                 const closestParentComponent = mutations[i].target.closest('[x-data]')
-                if (! (closestParentComponent && closestParentComponent.isSameNode(this.$el))) return
+
+                if (! (closestParentComponent && closestParentComponent.isSameNode(this.$el))) continue
 
                 if (mutations[i].type === 'attributes' && mutations[i].attributeName === 'x-data') {
-                    const rawData = saferEval(mutations[i].target.getAttribute('x-data'), {})
+                    const rawData = saferEval(mutations[i].target.getAttribute('x-data'), { $el: this.$el })
 
                     Object.keys(rawData).forEach(key => {
                         if (this.$data[key] !== rawData[key]) {
@@ -328,9 +354,9 @@ export default class Component {
 
                 if (mutations[i].addedNodes.length > 0) {
                     mutations[i].addedNodes.forEach(node => {
-                        if (node.nodeType !== 1) return
+                        if (node.nodeType !== 1 || node.__x_inserted_me) return
 
-                        if (node.matches('[x-data]')) {
+                        if (node.matches('[x-data]') && ! node.__x) {
                             node.__x = new Component(node)
                             return
                         }

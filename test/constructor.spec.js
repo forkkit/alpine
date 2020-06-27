@@ -1,5 +1,6 @@
 import Alpine from 'alpinejs'
 import { fireEvent, wait } from '@testing-library/dom'
+const timeout = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 test('auto-detect new components at the top level', async () => {
     var runObservers = []
@@ -34,7 +35,7 @@ test('auto-detect new components at the top level', async () => {
     await wait(() => { expect(document.querySelector('span').innerText).toEqual('bar') })
 })
 
-test('auto-detect newsted new components at the top level', async () => {
+test('auto-detect nested new components at the top level', async () => {
     var runObservers = []
 
     global.MutationObserver = class {
@@ -201,6 +202,51 @@ test('auto-initialize new elements added to a component', async () => {
     await wait(() => { expect(document.querySelector('#target span').innerText).toEqual(1) })
 })
 
+test('Alpine mutations don\'t trigger (like x-if and x-for) MutationObserver', async () => {
+    var runObservers = []
+    var evaluations = 0
+
+    global.MutationObserver = class {
+        constructor(callback) { runObservers.push(callback) }
+        observe() {}
+    }
+    window.bob = () => {
+        evaluations++
+        return 'lob'
+    }
+
+    document.body.innerHTML = `
+        <div x-data="{ foo: 'bar' }" id="component">
+            <template x-if="foo === 'baz'">
+                <span x-text="bob()"></span>
+            </template>
+
+            <button @click="foo = 'baz'"></button>
+        </div>
+    `
+
+    Alpine.start()
+
+    document.querySelector('button').click()
+
+    // Wait out the rendering tick.
+    await new Promise(resolve => setTimeout(resolve, 1))
+
+    // Run both queud mutations.
+    runObservers[0]([
+        { target: document.querySelector('#component'), addedNodes: [
+            document.querySelector('#component span'),
+        ] }
+    ])
+    runObservers[1]([
+        { target: document.querySelector('#component'), addedNodes: [
+            document.querySelector('#component span'),
+        ] }
+    ])
+
+    expect(evaluations).toEqual(2)
+})
+
 test('auto-detect x-data property changes at run-time', async () => {
     var runObservers = []
 
@@ -231,6 +277,38 @@ test('auto-detect x-data property changes at run-time', async () => {
     ])
 
     await wait(() => { expect(document.querySelector('span').innerText).toEqual(1) })
+})
+
+test('can use $el when changing x-data property at run-time', async () => {
+    var runObservers = []
+
+    global.MutationObserver = class {
+        constructor(callback) { runObservers.push(callback) }
+        observe() {}
+    }
+
+    document.body.innerHTML = `
+        <div x-data="{ count: '0' }" data-count="1">
+            <span x-text="count"></span>
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.querySelector('span').innerText).toEqual('0')
+
+    document.querySelector('div').setAttribute('x-data', '{ count: $el.dataset.count }')
+
+    runObservers[0]([
+        {
+            addedNodes: [],
+            type: 'attributes',
+            attributeName: 'x-data',
+            target: document.querySelector('div')
+        }
+    ])
+
+    await wait(() => { expect(document.querySelector('span').innerText).toEqual('1') })
 })
 
 test('nested components only get registered once on initialization', async () => {
@@ -278,4 +356,67 @@ test('can clone an existing component to a new element', async () => {
     Alpine.clone(document.querySelector('h1').__x, document.querySelector('h2'))
 
     expect(document.querySelector('span').innerText).toEqual('bar')
+})
+
+test('x-attributes are matched exactly', async () => {
+    document.body.innerHTML = `
+        <div x-data="{ showElement: false }">
+            <div id="el1" x-show="showElement" />
+            <div id="el2" xxx-show="showElement" />
+            <div id="el3" x-showabc="showElement" />
+        </div>
+    `
+
+    Alpine.start()
+
+    expect(document.getElementById('el1').style.display).toEqual('none')
+    expect(document.getElementById('el2').style.display).not.toEqual('none')
+    await wait(() => { expect(document.getElementById('el3').style.display).not.toEqual('none') })
+})
+
+
+test('a mutation from another part of the HTML doesnt prevent a different alpine component from initializing', async () => {
+    document.body.innerHTML = `
+        <div x-data x-init="registerInit()">
+        </div>
+    `
+
+    var initCount = 0
+    window.registerInit = function () {
+        initCount = initCount + 1
+    }
+
+    var runObservers = []
+
+    global.MutationObserver = class {
+        constructor(callback) { runObservers.push(callback) }
+        observe() {}
+    }
+
+    Alpine.start()
+
+    await wait(() => { expect(initCount).toEqual(1) })
+
+    document.querySelector('div').innerHTML = `
+        <h1 x-data x-init="registerInit()"></h1>
+    `
+    let h2 = document.createElement('h2')
+    document.querySelector('div').parentElement.appendChild(h2)
+
+    await timeout(5)
+
+    runObservers[0]([
+        {
+            target: document.querySelector('h2'),
+            type: 'attributes',
+            addedNodes: [],
+        },
+        {
+            target: document.querySelector('div'),
+            type: 'childList',
+            addedNodes: [ document.querySelector('h1') ],
+        }
+    ])
+
+    await wait(() => { expect(initCount).toEqual(2) })
 })
